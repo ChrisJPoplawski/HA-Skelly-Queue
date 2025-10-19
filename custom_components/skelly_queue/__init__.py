@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, logging, re, os, random
+import asyncio, logging, re, os, random, io
 from os import path, makedirs, stat, remove
 from typing import Deque, List
 from collections import deque
@@ -22,7 +22,7 @@ from .panel import SkellyPanelView, SkellyApiView
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON]
 
-URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+URL_RE = re.compile(r"^(https?://|smb://)", re.IGNORECASE)
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 PLAYABLE_EXT = (".mp3", ".wav", ".ogg", ".m4a", ".flac")
 
@@ -91,13 +91,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     def _media_path(local_name: str) -> str:
         return path.join(media_dir, local_name)
 
-    async def _send_play_command(filename: str) -> bool:
-        payload = f"PLAY:{filename}".encode("utf-8")
-        return await ble.write_play(payload)
+    async def _download_to_cache(url: str) -> str:
+        """Download http(s) or smb file to local cache and return media-relative path."""
+        if not allow_remote:
+            raise ValueError("Remote URLs are disabled.")
+        if url.lower().startswith("http"):
+            safe = _sanitize_name(url)
+            local_rel = path.join("cache", safe)
+            dest = _media_path(local_rel)
+            async with session.get(url, timeout=120) as resp:
+                resp.raise_for_status()
+                makedirs(path.dirname(dest), exist_ok=True)
+                with open(dest, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(8192):
+                        f.write(chunk)
+            await _evict_cache_if_needed()
+            return local_rel
 
-    async def _send_cmd(cmd: str) -> bool:
-        if not cmd_char: return False
-        return await ble.write_cmd(cmd.encode("utf-8"))
+        if url.lower().startswith("smb://"):
+            # smb://user:pass@host/share/path/file.mp3
+            try:
+                from urllib.parse import urlparse, unquote
+                from smb.SMBConnection import SMBConnection
+            except Exception as ex:
+                raise RuntimeError("SMB support requires pysmb; install via HACS manifest.") from ex
+            u = urlparse(url)
+            username = unquote(u.username or "")
+            password = unquote(u.password or "")
+            server = u.hostname
+            share, *parts = [p for p in u.path.split("/") if p]
+            remote_path = "/".join(parts)
+            if not (server and share and remote_path):
+                raise ValueError("SMB URL must look like smb://user:pass@host/share/path/file.mp3")
+            conn = SMBConnection(username, password, "ha-skelly", server, use_ntlm_v2=True, is_direct_tcp=True)
+            assert conn.connect(server, 445)
+            safe = _sanitize_name(remote_path)
+            local_rel = path.join("cache", safe)
+            dest = _media_path(local_rel)
+            makedirs(path.dirname(dest), exist_ok=True)
+            with open(dest, "wb") as f:
+                conn.retrieveFile(share, f"/{remote_path}", f)
+            conn.close()
+            await _evict_cache_if_needed()
+            return local_rel
+
+        raise ValueError("Unsupported URL scheme")
 
     async def _evict_cache_if_needed():
         try:
@@ -118,20 +156,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         except Exception as ex:
             _LOGGER.debug("Cache eviction failed: %s", ex)
 
-    async def _download_to_cache(url: str) -> str:
-        if not allow_remote:
-            raise ValueError("Remote URLs are disabled.")
-        safe = _sanitize_name(url)
-        local_rel = path.join("cache", safe)
-        dest = _media_path(local_rel)
-        async with session.get(url, timeout=60) as resp:
-            resp.raise_for_status()
-            makedirs(path.dirname(dest), exist_ok=True)
-            with open(dest, "wb") as f:
-                async for chunk in resp.content.iter_chunked(8192):
-                    f.write(chunk)
-        await _evict_cache_if_needed()
-        return local_rel
+    async def _send_play_command(filename: str) -> bool:
+        payload = f"PLAY:{filename}".encode("utf-8")
+        return await ble.write_play(payload)
+
+    async def _send_cmd(cmd: str) -> bool:
+        if not cmd_char: return False
+        return await ble.write_cmd(cmd.encode("utf-8"))
 
     async def _play_loop():
         nonlocal is_playing, now_playing
@@ -148,7 +179,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 hass.states.async_set(f"{DOMAIN}.now_playing", filename)
                 ok = await _send_play_command(filename)
                 if not ok: break
-                # TODO: replace with a real completion signal if Skelly provides one
+                # TODO: replace with device "done" event when available
                 await asyncio.sleep(10)
                 queue.popleft()
                 hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
@@ -194,8 +225,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     async def svc_enqueue_url(call):
         url = call.data.get("url")
         if not url: return
-        if url.lower().endswith((".m3u",".m3u8")):
-            await svc_enqueue_m3u(call); return
         rel = await _download_to_cache(url)
         queue.append(rel)
         hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
@@ -204,7 +233,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     async def svc_enqueue_m3u(call):
         url = call.data.get("url")
         if not url: return
-        async with session.get(url, timeout=60) as resp:
+        async with session.get(url, timeout=120) as resp:
             resp.raise_for_status()
             text = await resp.text()
         items = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
@@ -213,7 +242,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             if not URL_RE.match(item): continue
             try:
                 rel = await _download_to_cache(item); queue.append(rel); count += 1
-            except Exception: continue
+            except Exception as ex:
+                _LOGGER.debug("m3u item failed: %s", ex)
+                continue
         hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
         if count and not is_playing: hass.async_create_task(_play_loop())
 
@@ -241,7 +272,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
         if files and not is_playing: hass.async_create_task(_play_loop())
 
-    async def svc_play(_):
+    async def svc_play(_): 
         if queue and not is_playing: hass.async_create_task(_play_loop())
 
     async def svc_skip(_):
@@ -270,13 +301,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.states.async_set(f"{DOMAIN}.queue_length", 0)
     hass.states.async_set(f"{DOMAIN}.now_playing", "")
 
-    # ------- Panel (authenticated route) -------
+    # ------- Panel (authenticated API + public HTML) -------
     panel_data = {
         "config": {"media_dir": media_dir, "cache_dir": cache_dir},
         "queue": queue,
-        "controls": {},
         "presets": presets,
         "store": store,
+        "ble": ble,
+        "address": address,
+        "log_path": "/config/home-assistant.log",
     }
     hass.http.register_view(SkellyPanelView(hass, panel_data))
     hass.http.register_view(SkellyApiView(hass, panel_data))
@@ -295,7 +328,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     )
 
     _LOGGER.info(
-        "Skelly Queue v0.4.5 ready (keep-alive %s @ %ss, pair_on_connect=%s; PIN hint=%s). Media: %s",
+        "Skelly Queue v0.4.8 ready (keep-alive %s @ %ss, pair_on_connect=%s; PIN hint=%s). Media: %s",
         "on" if keepalive_enabled else "off", keepalive_sec,
         "on" if pair_on_connect else "off", pin_code_hint, media_dir
     )
