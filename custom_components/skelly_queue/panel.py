@@ -196,7 +196,7 @@ class SkellyApiView(HomeAssistantView):
     """Authenticated JSON API."""
     url = "/api/skelly_queue/{op}"
     name = "skelly_queue:api"
-    requires_auth = True
+    requires_auth = False # allow iframe to call without HA auth context
 
     def __init__(self, hass, data):
         self.hass = hass
