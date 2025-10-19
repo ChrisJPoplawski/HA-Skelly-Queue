@@ -9,6 +9,6 @@
   "codeowners": ["@ChrisJPoplawski"],
   "bluetooth": [{ "connectable": true }],
   "homeassistant": "2024.6.0",
-  "config_flow": true"
+  "config_flow": true
 }
 
