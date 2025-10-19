@@ -1,33 +1,73 @@
 from __future__ import annotations
-import voluptuous as vol
 from typing import Any, Optional
+
+import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.components import bluetooth
+from homeassistant.components.bluetooth import async_ble_device_from_address
 import homeassistant.helpers.selector as sel
+
+from bleak import BleakClient
+from bleak_retry_connector import establish_connection
 
 from .const import (
     DOMAIN, CONF_ADDRESS, CONF_PLAY_CHAR, CONF_CMD_CHAR,
-    CONF_MEDIA_DIR, CONF_ALLOW_REMOTE, CONF_CACHE_DIR, CONF_MAX_CACHE_MB
+    CONF_MEDIA_DIR, CONF_ALLOW_REMOTE, CONF_CACHE_DIR, CONF_MAX_CACHE_MB,
 )
 
 def _choices_from_bt(hass: HomeAssistant) -> list[sel.SelectOptionDict]:
     opts: list[sel.SelectOptionDict] = []
-    for dev in bluetooth.async_discovered_service_info(hass):
-        if dev.address:
-            name = dev.name or "Unknown"
-            label = f"{name} ({dev.address})"
-            opts.append(sel.SelectOptionDict(value=dev.address, label=label))
-    # dedupe by value
+    for info in bluetooth.async_discovered_service_info(hass):
+        if info.address:
+            label = f"{info.name or 'Unknown'} ({info.address})"
+            opts.append(sel.SelectOptionDict(value=info.address, label=label))
     seen = set()
     uniq = []
     for o in opts:
-        if o["value"] in seen: continue
-        uniq.append(o); seen.add(o["value"])
+        if o["value"] in seen:
+            continue
+        uniq.append(o)
+        seen.add(o["value"])
     return uniq
 
-class SkellyQueueFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
+async def _detect_write_chars(hass: HomeAssistant, address: str) -> tuple[Optional[str], Optional[str]]:
+    """Connect via HA Bluetooth + Bleak; return (play_char, cmd_char) best-guess."""
+    dev = async_ble_device_from_address(hass, address, connectable=True)
+    if not dev:
+        # try a short wait for discovery
+        for _ in range(8):
+            await hass.async_add_executor_job(lambda: None)
+            dev = async_ble_device_from_address(hass, address, connectable=True)
+            if dev:
+                break
+    if not dev:
+        return (None, None)
+
+    client: BleakClient = await establish_connection(BleakClient, dev, name="skelly-detect", max_attempts=3)
+    await client.get_services()  # ensure services populated
+
+    # Prefer 128-bit vendor UUIDs that are writable
+    cands = []
+    for svc in client.services:
+        for ch in svc.characteristics:
+            props = {p.lower() for p in ch.properties}
+            if "write" in props or "write without response" in props:
+                cu = str(ch.uuid)
+                score = (len(cu) > 8, "without" in " ".join(props))
+                cands.append((score, cu))
+    cands.sort(reverse=True)
+    play_char = cands[0][1] if cands else None
+    cmd_char = cands[1][1] if len(cands) > 1 else None
+
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
+    return (play_char, cmd_char)
+
+class SkellyQueueFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     _address: Optional[str] = None
     _play_char: Optional[str] = None
@@ -40,9 +80,8 @@ class SkellyQueueFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             addr = user_input.get(CONF_ADDRESS) or user_input.get("discovered")
             self._address = addr
-            # prevent duplicates
-            for entry in self._async_current_entries():
-                if entry.data.get(CONF_ADDRESS) == addr:
+            for e in self._async_current_entries():
+                if e.data.get(CONF_ADDRESS) == addr:
                     return self.async_abort(reason="already_configured")
             return await self.async_step_chars()
 
@@ -57,8 +96,15 @@ class SkellyQueueFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_chars(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         if user_input is not None:
-            self._play_char = user_input[CONF_PLAY_CHAR]
-            self._cmd_char = user_input.get(CONF_CMD_CHAR)
+            # auto-detect if requested
+            if user_input.get("auto_detect"):
+                play, cmd = await _detect_write_chars(self.hass, self._address)
+                self._play_char = play or user_input.get(CONF_PLAY_CHAR, "")
+                self._cmd_char = cmd or user_input.get(CONF_CMD_CHAR)
+            else:
+                self._play_char = user_input[CONF_PLAY_CHAR]
+                self._cmd_char = user_input.get(CONF_CMD_CHAR)
+
             data = {
                 CONF_ADDRESS: self._address,
                 CONF_PLAY_CHAR: self._play_char,
@@ -70,15 +116,18 @@ class SkellyQueueFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             }
             return self.async_create_entry(title=f"Skelly ({self._address})", data=data)
 
+        # initial form (auto detect default ON)
         schema = vol.Schema({
-            vol.Required(CONF_PLAY_CHAR): str,
-            vol.Optional(CONF_CMD_CHAR): str,
+            vol.Optional("auto_detect", default=True): bool,
+            vol.Optional(CONF_PLAY_CHAR, default=""): str,
+            vol.Optional(CONF_CMD_CHAR, default=""): str,
         })
         return self.async_show_form(step_id="chars", data_schema=schema)
 
     async def async_step_import(self, import_config: dict[str, Any]) -> FlowResult:
-        """YAML import (optional)."""
-        return await self.async_step_device(import_config)
+        # support YAML import if present
+        self._address = import_config.get(CONF_ADDRESS)
+        return await self.async_step_chars()
 
 class SkellyQueueOptionsFlow(config_entries.OptionsFlow):
     def __init__(self, entry: config_entries.ConfigEntry) -> None:

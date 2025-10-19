@@ -4,7 +4,7 @@
     "step": {
       "device": {
         "title": "Pick your Skelly",
-        "description": "Select a discovered BLE device or enter its MAC.",
+        "description": "Select a discovered Bluetooth device or enter its MAC address.",
         "data": {
           "address": "Bluetooth address (MAC)",
           "discovered": "Discovered devices"
@@ -12,8 +12,9 @@
       },
       "chars": {
         "title": "GATT Characteristics",
-        "description": "Enter the characteristic UUIDs used by Skelly.",
+        "description": "Auto-detect writable characteristics or enter UUIDs.",
         "data": {
+          "auto_detect": "Auto-detect characteristics",
           "play_char": "Play characteristic UUID",
           "cmd_char": "Command characteristic UUID (optional)"
         }
@@ -30,7 +31,7 @@
         "data": {
           "media_dir": "Media directory",
           "allow_remote_urls": "Allow remote URLs",
-          "cache_dir": "Cache directory (for URL downloads)",
+          "cache_dir": "Cache directory",
           "max_cache_mb": "Max cache size (MB)"
         }
       }
