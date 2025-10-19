@@ -1,7 +1,7 @@
 {
   "domain": "skelly_queue",
   "name": "Skelly Queue (Simple)",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "documentation": "https://github.com/ChrisJPoplawski/HA-Skelly-Queue",
   "requirements": [],
   "dependencies": ["bluetooth", "media_source", "frontend", "http"],
