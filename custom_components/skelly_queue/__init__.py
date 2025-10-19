@@ -44,7 +44,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         try: makedirs(d, exist_ok=True)
         except Exception as ex: _LOGGER.warning("Could not create dir %s: %s", d, ex)
 
-    # Auto-detect UUIDs once if missing (works with or without BT Proxy)
+    # Auto-detect UUIDs if missing
     if not play_char:
         try:
             dev = async_ble_device_from_address(hass, address, connectable=True)
@@ -148,7 +148,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 hass.states.async_set(f"{DOMAIN}.now_playing", filename)
                 ok = await _send_play_command(filename)
                 if not ok: break
-                # Replace with proper notify if Skelly supports it
                 await asyncio.sleep(10)
                 queue.popleft()
                 hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
@@ -267,11 +266,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.services.async_register(DOMAIN, SERVICE_CLEAR, svc_clear)
     hass.services.async_register(DOMAIN, SERVICE_STOP, svc_stop)
 
-    # Initial helper states for sensors
     hass.states.async_set(f"{DOMAIN}.queue_length", 0)
     hass.states.async_set(f"{DOMAIN}.now_playing", "")
 
-    # ------- Panel (file picker) -------
+    # ------- Panel (fixed path) -------
     panel_data = {
         "config": {"media_dir": media_dir, "cache_dir": cache_dir},
         "queue": queue,
@@ -290,7 +288,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         sidebar_title="Skelly Queue",
         sidebar_icon="mdi:playlist-music",
         frontend_url_path=panel_url_path,
-        config={"url": "/skelly_queue"},
+        config={"url": "/api/skelly_queue/panel"},
         require_admin=False,
         update=True,
     )
