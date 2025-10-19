@@ -1,0 +1,21 @@
+{
+  "domain": "skelly_queue",
+  "name": "Skelly Queue (Simple)",
+  "version": "0.1.0",
+  "documentation": "https://github.com/<your-account>/ha-skelly-queue",
+  "requirements": [],
+  "dependencies": [
+    "bluetooth",
+    "media_source"
+  ],
+  "iot_class": "local_push",
+  "codeowners": [
+    "@<your-account>"
+  ],
+  "bluetooth": [
+    {
+      "connectable": true
+    }
+  ],
+  "homeassistant": "2024.6.0"
+}

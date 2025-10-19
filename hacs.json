@@ -1,0 +1,9 @@
+{
+  "name": "Skelly Queue (Simple)",
+  "render_readme": true,
+  "country": "US",
+  "domains": [
+    "skelly_queue"
+  ],
+  "homeassistant": "2024.6.0"
+}

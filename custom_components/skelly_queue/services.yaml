@@ -1,0 +1,45 @@
+enqueue:
+  name: Enqueue
+  description: Add a local audio file (in media_dir) to the play queue
+  fields:
+    filename:
+      required: true
+      example: "boo_01.mp3"
+      selector:
+        text:
+
+enqueue_url:
+  name: Enqueue URL
+  description: Download an http(s) audio file into cache and enqueue it
+  fields:
+    url:
+      required: true
+      example: "https://example.com/sounds/boo_01.mp3"
+      selector:
+        text:
+
+enqueue_m3u:
+  name: Enqueue M3U
+  description: Download and parse a remote .m3u or .m3u8 and enqueue all playable entries
+  fields:
+    url:
+      required: true
+      example: "https://example.com/halloween_playlist.m3u8"
+      selector:
+        text:
+
+play:
+  name: Play
+  description: Start or resume playback for the current queue
+
+skip:
+  name: Skip
+  description: Skip to the next queued item
+
+clear:
+  name: Clear Queue
+  description: Remove all items from the queue
+
+stop:
+  name: Stop
+  description: Stop playback and clear the queue
