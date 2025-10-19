@@ -1,21 +1,14 @@
 {
   "domain": "skelly_queue",
   "name": "Skelly Queue (Simple)",
-  "version": "0.1.0",
-  "documentation": "https://github.com/ChrisJPoplawski/ha-skelly-queue",
+  "version": "0.2.0",
+  "documentation": "https://github.com/ChrisJPoplawski/HA-Skelly-Queue",
   "requirements": [],
-  "dependencies": [
-    "bluetooth",
-    "media_source"
-  ],
+  "dependencies": ["bluetooth", "media_source"],
   "iot_class": "local_push",
-  "codeowners": [
-    "@ChrisJPoplawski"
-  ],
-  "bluetooth": [
-    {
-      "connectable": true
-    }
-  ],
-  "homeassistant": "2024.6.0"
+  "codeowners": ["@ChrisJPoplawski"],
+  "bluetooth": [{ "connectable": true }],
+  "homeassistant": "2024.6.0",
+  "config_flow": true
 }
+

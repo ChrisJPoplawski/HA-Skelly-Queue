@@ -1,0 +1,40 @@
+{
+  "config": {
+    "title": "Skelly Queue",
+    "step": {
+      "device": {
+        "title": "Pick your Skelly",
+        "description": "Select a discovered BLE device or enter its MAC.",
+        "data": {
+          "address": "Bluetooth address (MAC)",
+          "discovered": "Discovered devices"
+        }
+      },
+      "chars": {
+        "title": "GATT Characteristics",
+        "description": "Enter the characteristic UUIDs used by Skelly.",
+        "data": {
+          "play_char": "Play characteristic UUID",
+          "cmd_char": "Command characteristic UUID (optional)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This device is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "main": {
+        "title": "Skelly Queue options",
+        "data": {
+          "media_dir": "Media directory",
+          "allow_remote_urls": "Allow remote URLs",
+          "cache_dir": "Cache directory (for URL downloads)",
+          "max_cache_mb": "Max cache size (MB)"
+        }
+      }
+    }
+  }
+}
+
