@@ -15,6 +15,8 @@ from bleak_retry_connector import establish_connection
 from .const import (
     DOMAIN, CONF_ADDRESS, CONF_PLAY_CHAR, CONF_CMD_CHAR,
     CONF_MEDIA_DIR, CONF_ALLOW_REMOTE, CONF_CACHE_DIR, CONF_MAX_CACHE_MB,
+    CONF_KEEPALIVE_ENABLED, CONF_KEEPALIVE_SEC,
+    CONF_PAIR_ON_CONNECT, CONF_PIN_CODE,
 )
 
 def _choices_from_bt(hass: HomeAssistant) -> list[sel.SelectOptionDict]:
@@ -30,7 +32,6 @@ def _choices_from_bt(hass: HomeAssistant) -> list[sel.SelectOptionDict]:
     return uniq
 
 async def _detect_write_chars(hass: HomeAssistant, address: str) -> tuple[Optional[str], Optional[str]]:
-    """Connect with HA Bluetooth/Bleak; return (play_char, cmd_char) best guess."""
     dev = async_ble_device_from_address(hass, address, connectable=True)
     if not dev:
         for _ in range(8):
@@ -102,7 +103,12 @@ class SkellyQueueFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_MEDIA_DIR: "/media/skelly",
                 CONF_ALLOW_REMOTE: True,
                 CONF_CACHE_DIR: "/media/skelly/cache",
-                CONF_MAX_CACHE_MB: 500
+                CONF_MAX_CACHE_MB: 500,
+                CONF_KEEPALIVE_ENABLED: True,
+                CONF_KEEPALIVE_SEC: 5,
+                # Pairing defaults
+                CONF_PAIR_ON_CONNECT: True,
+                CONF_PIN_CODE: "1234",
             }
 
             if errors:
@@ -125,4 +131,34 @@ class SkellyQueueFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_import(self, import_config: dict[str, Any]) -> FlowResult:
         self._address = import_config.get(CONF_ADDRESS)
         return await self.async_step_chars()
+
+# Options flow to tweak media, cache, remote, keepalive, and pairing
+class SkellyQueueOptionsFlow(config_entries.OptionsFlow):
+    def __init__(self, entry: config_entries.ConfigEntry) -> None:
+        self.entry = entry
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        return await self.async_step_main(user_input)
+
+    async def async_step_main(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        if user_input is not None:
+            data = dict(self.entry.data)
+            data.update(user_input)
+            self.hass.config_entries.async_update_entry(self.entry, data=data)
+            return self.async_create_entry(title="", data={})
+        d = self.entry.data
+        schema = vol.Schema({
+            vol.Optional(CONF_MEDIA_DIR, default=d.get(CONF_MEDIA_DIR, "/media/skelly")): str,
+            vol.Optional(CONF_ALLOW_REMOTE, default=d.get(CONF_ALLOW_REMOTE, True)): bool,
+            vol.Optional(CONF_CACHE_DIR, default=d.get(CONF_CACHE_DIR, "/media/skelly/cache")): str,
+            vol.Optional(CONF_MAX_CACHE_MB, default=d.get(CONF_MAX_CACHE_MB, 500)): int,
+            vol.Optional(CONF_KEEPALIVE_ENABLED, default=d.get(CONF_KEEPALIVE_ENABLED, True)): bool,
+            vol.Optional(CONF_KEEPALIVE_SEC, default=d.get(CONF_KEEPALIVE_SEC, 5)): int,
+            vol.Optional(CONF_PAIR_ON_CONNECT, default=d.get(CONF_PAIR_ON_CONNECT, True)): bool,
+            vol.Optional(CONF_PIN_CODE, default=d.get(CONF_PIN_CODE, "1234")): str,
+        })
+        return self.async_show_form(step_id="main", data_schema=schema)
+
+async def async_get_options_flow(config_entry: config_entries.ConfigEntry):
+    return SkellyQueueOptionsFlow(config_entry)
 

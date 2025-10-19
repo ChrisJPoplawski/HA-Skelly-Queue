@@ -9,13 +9,14 @@ from bleak import BleakClient
 _LOGGER = logging.getLogger(__name__)
 
 class SkellyBle:
-    """Tiny BLE helper that rides HA's shared Bluetooth stack (works with proxies)."""
+    """Tiny BLE helper that rides HA's shared Bluetooth stack (works with or without proxies)."""
 
-    def __init__(self, hass, address: str, play_char: str, cmd_char: Optional[str] = None):
+    def __init__(self, hass, address: str, play_char: str, cmd_char: Optional[str] = None, pair_on_connect: bool = True):
         self.hass = hass
         self.address = address
         self.play_char = play_char
         self.cmd_char = cmd_char
+        self.pair_on_connect = pair_on_connect
         self._client: Optional[BleakClient] = None
         self._lock = asyncio.Lock()
 
@@ -37,9 +38,28 @@ class SkellyBle:
         dev = await self._get_ble_device()
         if not dev:
             return None
-        self._client = await establish_connection(
-            client_class=BleakClient, device=dev, name="skelly-queue", max_attempts=3
-        )
+        # Prefer passing pair=True if supported by this connector version.
+        try:
+            self._client = await establish_connection(
+                client_class=BleakClient,
+                device=dev,
+                name="skelly-queue",
+                max_attempts=3,
+                **({"pair": True} if self.pair_on_connect else {})
+            )
+        except TypeError:
+            # Older bleak_retry_connector: no "pair" kwarg
+            self._client = await establish_connection(
+                client_class=BleakClient, device=dev, name="skelly-queue", max_attempts=3
+            )
+
+        # Try explicit pairing call where supported; harmless no-op on some backends.
+        if self.pair_on_connect:
+            try:
+                await self._client.pair()
+            except Exception:
+                pass
+
         return self._client
 
     async def write_play(self, payload: bytes) -> bool:

@@ -31,7 +31,11 @@
           "media_dir": "Media directory",
           "allow_remote_urls": "Allow remote URLs",
           "cache_dir": "Cache directory",
-          "max_cache_mb": "Max cache size (MB)"
+          "max_cache_mb": "Max cache size (MB)",
+          "keepalive_enabled": "Send BLE keep-alive",
+          "keepalive_sec": "Keep-alive interval (seconds)",
+          "pair_on_connect": "Attempt BLE pairing on connect (requires OS agent/PIN prompt)",
+          "pin_code": "PIN code hint (e.g. 1234)"
         }
       }
     }

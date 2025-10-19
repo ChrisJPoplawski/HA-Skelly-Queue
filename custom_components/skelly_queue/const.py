@@ -8,6 +8,14 @@ CONF_ALLOW_REMOTE = "allow_remote_urls"
 CONF_CACHE_DIR = "cache_dir"
 CONF_MAX_CACHE_MB = "max_cache_mb"
 
+# Keep-alive settings
+CONF_KEEPALIVE_ENABLED = "keepalive_enabled"
+CONF_KEEPALIVE_SEC = "keepalive_sec"
+
+# Pairing options
+CONF_PAIR_ON_CONNECT = "pair_on_connect"
+CONF_PIN_CODE = "pin_code"  # informational hint only; BlueZ agent handles actual entry
+
 SERVICE_ENQUEUE = "enqueue"
 SERVICE_ENQUEUE_URL = "enqueue_url"
 SERVICE_ENQUEUE_M3U = "enqueue_m3u"

@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, logging, re, json, os, random
+import asyncio, logging, re, os, random
 from os import path, makedirs, stat, remove
 from typing import Deque, List
 from collections import deque
@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
-from homeassistant.components.frontend import async_register_built_in_panel
+from homeassistant.components.frontend import async_register_built_in_panel, async_remove_panel
 
 from bleak import BleakClient
 from bleak_retry_connector import establish_connection
@@ -35,12 +35,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     allow_remote = data.get(CONF_ALLOW_REMOTE, True)
     cache_dir = data.get(CONF_CACHE_DIR, "/media/skelly/cache")
     max_cache_mb = max(50, int(data.get(CONF_MAX_CACHE_MB, 500)))
+    keepalive_enabled = bool(data.get(CONF_KEEPALIVE_ENABLED, True))
+    keepalive_sec = max(1, int(data.get(CONF_KEEPALIVE_SEC, 5)))
+    pair_on_connect = bool(data.get(CONF_PAIR_ON_CONNECT, True))
+    pin_code_hint = (data.get(CONF_PIN_CODE) or "1234").strip()
 
     for d in (media_dir, cache_dir):
         try: makedirs(d, exist_ok=True)
         except Exception as ex: _LOGGER.warning("Could not create dir %s: %s", d, ex)
 
-    # One-time startup auto-detect if UUIDs are missing (works over BT Proxy)
+    # Auto-detect UUIDs once if missing (works with or without BT Proxy)
     if not play_char:
         try:
             dev = async_ble_device_from_address(hass, address, connectable=True)
@@ -68,14 +72,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         except Exception as ex:
             _LOGGER.warning("Startup auto-detect failed: %s", ex)
 
-    ble = SkellyBle(hass, address, play_char, cmd_char or None)
-    queue: Deque[str] = deque()            # filenames relative to media_dir
+    ble = SkellyBle(hass, address, play_char, cmd_char or None, pair_on_connect=pair_on_connect)
+    queue: Deque[str] = deque()
     is_playing = False
     now_playing: str | None = None
     play_lock = asyncio.Lock()
     session = async_get_clientsession(hass)
 
-    # Presets storage (simple show lists)
+    # Presets storage
     store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.storage")
     presets = await store.async_load() or {}
     if not isinstance(presets, dict): presets = {}
@@ -88,7 +92,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         return path.join(media_dir, local_name)
 
     async def _send_play_command(filename: str) -> bool:
-        # Adjust if your Skelly expects a different payload format
         payload = f"PLAY:{filename}".encode("utf-8")
         return await ble.write_play(payload)
 
@@ -145,7 +148,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 hass.states.async_set(f"{DOMAIN}.now_playing", filename)
                 ok = await _send_play_command(filename)
                 if not ok: break
-                # Replace with proper GATT notify if Skelly supports; simple fixed wait otherwise.
+                # Replace with proper notify if Skelly supports it
                 await asyncio.sleep(10)
                 queue.popleft()
                 hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
@@ -154,6 +157,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         finally:
             async with play_lock:
                 is_playing = False
+
+    # ---- Keep-alive (optional) ----
+    keepalive_task: asyncio.Task | None = None
+    async def _keepalive_loop():
+        if not cmd_char:
+            _LOGGER.debug("Keep-alive skipped: no cmd_char configured.")
+            return
+        while True:
+            try:
+                await asyncio.sleep(keepalive_sec)
+                await ble.write_cmd(b"PING")
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                continue
+
+    if keepalive_enabled:
+        keepalive_task = hass.loop.create_task(_keepalive_loop())
 
     # ------- Services -------
     async def svc_enqueue(call):
@@ -260,21 +281,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     }
     hass.http.register_view(SkellyPanelView(hass, panel_data))
     hass.http.register_view(SkellyApiView(hass, panel_data))
-    # One-liner built-in panel (points to /skelly_queue)
-    async_register_built_in_panel(hass, "iframe", "Skelly Queue", "mdi:playlist-music",
-                                  {"url": "/skelly_queue"}, update=True, require_admin=False)
+
+    panel_url_path = "skelly-queue"
+    async_remove_panel(hass, panel_url_path)
+    async_register_built_in_panel(
+        hass,
+        component_name="iframe",
+        sidebar_title="Skelly Queue",
+        sidebar_icon="mdi:playlist-music",
+        frontend_url_path=panel_url_path,
+        config={"url": "/skelly_queue"},
+        require_admin=False,
+        update=True,
+    )
+
+    _LOGGER.info(
+        "Skelly Queue v0.4.4 ready (keep-alive %s @ %ss, pair_on_connect=%s; PIN hint=%s). Media: %s",
+        "on" if keepalive_enabled else "off", keepalive_sec,
+        "on" if pair_on_connect else "off", pin_code_hint, media_dir
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    async def _shutdown(_evt): await ble.disconnect()
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _shutdown)
+    async def _shutdown(_evt):
+        if keepalive_task:
+            keepalive_task.cancel()
+        await ble.disconnect()
 
-    _LOGGER.info("Skelly Queue v0.4.0 ready (BT proxy-friendly). Media: %s", media_dir)
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _shutdown)
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    # Note: panel removal is automatic on reload because it's 'built_in' with same url.
     return unload_ok
 
