@@ -20,12 +20,8 @@
         }
       }
     },
-    "abort": {
-      "already_configured": "This device is already configured."
-    },
-    "error": {
-      "detect_failed": "Auto-detect failed. Make sure Skelly is powered on and in range."
-    }
+    "abort": { "already_configured": "This device is already configured." },
+    "error": { "detect_failed": "Auto-detect failed. Make sure Skelly is powered on and in range." }
   },
   "options": {
     "step": {

@@ -9,6 +9,8 @@ from bleak import BleakClient
 _LOGGER = logging.getLogger(__name__)
 
 class SkellyBle:
+    """Tiny BLE helper that rides HA's shared Bluetooth stack (works with proxies)."""
+
     def __init__(self, hass, address: str, play_char: str, cmd_char: Optional[str] = None):
         self.hass = hass
         self.address = address

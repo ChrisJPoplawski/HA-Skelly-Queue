@@ -23,45 +23,37 @@ def _choices_from_bt(hass: HomeAssistant) -> list[sel.SelectOptionDict]:
         if info.address:
             label = f"{info.name or 'Unknown'} ({info.address})"
             opts.append(sel.SelectOptionDict(value=info.address, label=label))
-    seen = set()
-    uniq = []
+    seen = set(); uniq = []
     for o in opts:
-        if o["value"] in seen:
-            continue
-        uniq.append(o)
-        seen.add(o["value"])
+        if o["value"] in seen: continue
+        uniq.append(o); seen.add(o["value"])
     return uniq
 
 async def _detect_write_chars(hass: HomeAssistant, address: str) -> tuple[Optional[str], Optional[str]]:
-    """Connect using HA Bluetooth/Bleak; return (play_char, cmd_char)."""
+    """Connect with HA Bluetooth/Bleak; return (play_char, cmd_char) best guess."""
     dev = async_ble_device_from_address(hass, address, connectable=True)
     if not dev:
         for _ in range(8):
             dev = async_ble_device_from_address(hass, address, connectable=True)
-            if dev:
-                break
+            if dev: break
     if not dev:
         return (None, None)
 
     client: BleakClient = await establish_connection(BleakClient, dev, name="skelly-detect", max_attempts=3)
-    await client.get_services()  # ensure populated
-
+    await client.get_services()
     cands = []
     for svc in client.services:
         for ch in svc.characteristics:
             props = {p.lower() for p in ch.properties}
             if "write" in props or "write without response" in props:
                 cu = str(ch.uuid)
-                score = (len(cu) > 8, "without" in " ".join(props))  # prefer 128-bit + write w/o response
+                score = (len(cu) > 8, "without" in " ".join(props))
                 cands.append((score, cu))
     cands.sort(reverse=True)
     play_char = cands[0][1] if cands else None
     cmd_char = cands[1][1] if len(cands) > 1 else None
-
-    try:
-        await client.disconnect()
-    except Exception:
-        pass
+    try: await client.disconnect()
+    except Exception: pass
     return (play_char, cmd_char)
 
 class SkellyQueueFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -80,10 +72,9 @@ class SkellyQueueFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return self.async_abort(reason="already_configured")
             return await self.async_step_chars()
 
-        options = _choices_from_bt(self.hass)
         schema = vol.Schema({
             vol.Optional("discovered"): sel.SelectSelector(
-                sel.SelectSelectorConfig(options=options, mode=sel.SelectSelectorMode.DROPDOWN)
+                sel.SelectSelectorConfig(options=_choices_from_bt(self.hass), mode=sel.SelectSelectorMode.DROPDOWN)
             ),
             vol.Optional(CONF_ADDRESS, default=""): str,
         })
@@ -111,7 +102,7 @@ class SkellyQueueFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_MEDIA_DIR: "/media/skelly",
                 CONF_ALLOW_REMOTE: True,
                 CONF_CACHE_DIR: "/media/skelly/cache",
-                CONF_MAX_CACHE_MB: 500,
+                CONF_MAX_CACHE_MB: 500
             }
 
             if errors:

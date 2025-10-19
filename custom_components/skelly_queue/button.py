@@ -20,7 +20,6 @@ class SkellyActionButton(ButtonEntity):
         self._attr_name = f"Skelly {name}"
         self._attr_icon = icon
         self._attr_unique_id = f"{entry.entry_id}_{name.lower()}"
-
     async def async_press(self) -> None:
         await self._hass.services.async_call(DOMAIN, self._svc, {}, blocking=False)
 

@@ -5,8 +5,7 @@ enqueue:
     filename:
       required: true
       example: "boo_01.mp3"
-      selector:
-        text:
+      selector: { text: {} }
 
 enqueue_url:
   name: Enqueue URL
@@ -15,8 +14,7 @@ enqueue_url:
     url:
       required: true
       example: "https://example.com/sounds/boo_01.mp3"
-      selector:
-        text:
+      selector: { text: {} }
 
 enqueue_m3u:
   name: Enqueue M3U
@@ -25,8 +23,36 @@ enqueue_m3u:
     url:
       required: true
       example: "https://example.com/halloween_playlist.m3u8"
+      selector: { text: {} }
+
+enqueue_dir:
+  name: Enqueue Directory
+  description: Enqueue all playable files in a subfolder (relative to media_dir)
+  fields:
+    subpath:
+      required: true
+      example: "night_show"
+      selector: { text: {} }
+    recursive:
+      required: false
+      default: true
+      selector: { boolean: {} }
+    shuffle:
+      required: false
+      default: false
+      selector: { boolean: {} }
+
+enqueue_bulk:
+  name: Enqueue Bulk
+  description: Enqueue a list of filenames (relative to media_dir), in order
+  fields:
+    items:
+      required: true
+      example:
+        - "boo_01.mp3"
+        - "boo_02.mp3"
       selector:
-        text:
+        object: {}
 
 play:
   name: Play
