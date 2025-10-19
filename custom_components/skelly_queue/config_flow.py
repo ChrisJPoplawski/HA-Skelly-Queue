@@ -33,12 +33,10 @@ def _choices_from_bt(hass: HomeAssistant) -> list[sel.SelectOptionDict]:
     return uniq
 
 async def _detect_write_chars(hass: HomeAssistant, address: str) -> tuple[Optional[str], Optional[str]]:
-    """Connect via HA Bluetooth + Bleak; return (play_char, cmd_char) best-guess."""
+    """Connect using HA Bluetooth/Bleak; return (play_char, cmd_char)."""
     dev = async_ble_device_from_address(hass, address, connectable=True)
     if not dev:
-        # try a short wait for discovery
         for _ in range(8):
-            await hass.async_add_executor_job(lambda: None)
             dev = async_ble_device_from_address(hass, address, connectable=True)
             if dev:
                 break
@@ -46,16 +44,15 @@ async def _detect_write_chars(hass: HomeAssistant, address: str) -> tuple[Option
         return (None, None)
 
     client: BleakClient = await establish_connection(BleakClient, dev, name="skelly-detect", max_attempts=3)
-    await client.get_services()  # ensure services populated
+    await client.get_services()  # ensure populated
 
-    # Prefer 128-bit vendor UUIDs that are writable
     cands = []
     for svc in client.services:
         for ch in svc.characteristics:
             props = {p.lower() for p in ch.properties}
             if "write" in props or "write without response" in props:
                 cu = str(ch.uuid)
-                score = (len(cu) > 8, "without" in " ".join(props))
+                score = (len(cu) > 8, "without" in " ".join(props))  # prefer 128-bit + write w/o response
                 cands.append((score, cu))
     cands.sort(reverse=True)
     play_char = cands[0][1] if cands else None
@@ -70,8 +67,6 @@ async def _detect_write_chars(hass: HomeAssistant, address: str) -> tuple[Option
 class SkellyQueueFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     _address: Optional[str] = None
-    _play_char: Optional[str] = None
-    _cmd_char: Optional[str] = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         return await self.async_step_device()
@@ -95,28 +90,40 @@ class SkellyQueueFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="device", data_schema=schema)
 
     async def async_step_chars(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        errors: dict[str, str] = {}
         if user_input is not None:
-            # auto-detect if requested
-            if user_input.get("auto_detect"):
-                play, cmd = await _detect_write_chars(self.hass, self._address)
-                self._play_char = play or user_input.get(CONF_PLAY_CHAR, "")
-                self._cmd_char = cmd or user_input.get(CONF_CMD_CHAR)
-            else:
-                self._play_char = user_input[CONF_PLAY_CHAR]
-                self._cmd_char = user_input.get(CONF_CMD_CHAR)
+            auto = user_input.get("auto_detect", True)
+            play = (user_input.get(CONF_PLAY_CHAR) or "").strip() or None
+            cmd = (user_input.get(CONF_CMD_CHAR) or "").strip() or None
+
+            if auto:
+                try:
+                    det_play, det_cmd = await _detect_write_chars(self.hass, self._address)
+                    play = play or det_play
+                    cmd = cmd or det_cmd
+                except Exception:
+                    errors["base"] = "detect_failed"
 
             data = {
                 CONF_ADDRESS: self._address,
-                CONF_PLAY_CHAR: self._play_char,
-                CONF_CMD_CHAR: self._cmd_char,
+                CONF_PLAY_CHAR: play or "",
+                CONF_CMD_CHAR: cmd or "",
                 CONF_MEDIA_DIR: "/media/skelly",
                 CONF_ALLOW_REMOTE: True,
                 CONF_CACHE_DIR: "/media/skelly/cache",
                 CONF_MAX_CACHE_MB: 500,
             }
+
+            if errors:
+                schema = vol.Schema({
+                    vol.Optional("auto_detect", default=True): bool,
+                    vol.Optional(CONF_PLAY_CHAR, default=play or ""): str,
+                    vol.Optional(CONF_CMD_CHAR, default=cmd or ""): str,
+                })
+                return self.async_show_form(step_id="chars", data_schema=schema, errors=errors)
+
             return self.async_create_entry(title=f"Skelly ({self._address})", data=data)
 
-        # initial form (auto detect default ON)
         schema = vol.Schema({
             vol.Optional("auto_detect", default=True): bool,
             vol.Optional(CONF_PLAY_CHAR, default=""): str,
@@ -125,32 +132,6 @@ class SkellyQueueFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="chars", data_schema=schema)
 
     async def async_step_import(self, import_config: dict[str, Any]) -> FlowResult:
-        # support YAML import if present
         self._address = import_config.get(CONF_ADDRESS)
         return await self.async_step_chars()
-
-class SkellyQueueOptionsFlow(config_entries.OptionsFlow):
-    def __init__(self, entry: config_entries.ConfigEntry) -> None:
-        self.entry = entry
-
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        return await self.async_step_main(user_input)
-
-    async def async_step_main(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        if user_input is not None:
-            data = dict(self.entry.data)
-            data.update(user_input)
-            self.hass.config_entries.async_update_entry(self.entry, data=data)
-            return self.async_create_entry(title="", data={})
-        d = self.entry.data
-        schema = vol.Schema({
-            vol.Optional(CONF_MEDIA_DIR, default=d.get(CONF_MEDIA_DIR, "/media/skelly")): str,
-            vol.Optional(CONF_ALLOW_REMOTE, default=d.get(CONF_ALLOW_REMOTE, True)): bool,
-            vol.Optional(CONF_CACHE_DIR, default=d.get(CONF_CACHE_DIR, "/media/skelly/cache")): str,
-            vol.Optional(CONF_MAX_CACHE_MB, default=d.get(CONF_MAX_CACHE_MB, 500)): int,
-        })
-        return self.async_show_form(step_id="main", data_schema=schema)
-
-async def async_get_options_flow(config_entry: config_entries.ConfigEntry):
-    return SkellyQueueOptionsFlow(config_entry)
 

@@ -16,11 +16,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, add: AddEnt
 class SkellyActionButton(ButtonEntity):
     def __init__(self, hass, entry, name, svc, icon):
         self._hass = hass
-        self._entry = entry
         self._svc = svc
         self._attr_name = f"Skelly {name}"
         self._attr_icon = icon
         self._attr_unique_id = f"{entry.entry_id}_{name.lower()}"
+
     async def async_press(self) -> None:
         await self._hass.services.async_call(DOMAIN, self._svc, {}, blocking=False)
 

@@ -1,6 +1,6 @@
 enqueue:
   name: Enqueue
-  description: Add a local audio file (in media_dir) to the play queue
+  description: Add a local audio file (relative to media_dir) to the play queue
   fields:
     filename:
       required: true
@@ -43,3 +43,4 @@ clear:
 stop:
   name: Stop
   description: Stop playback and clear the queue
+

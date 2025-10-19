@@ -21,7 +21,6 @@ class SkellyBle:
         dev = async_ble_device_from_address(self.hass, self.address, connectable=True)
         if dev:
             return dev
-        # brief retry loop for discovery
         for _ in range(10):
             await asyncio.sleep(0.5)
             dev = async_ble_device_from_address(self.hass, self.address, connectable=True)
@@ -64,3 +63,4 @@ class SkellyBle:
             if self._client and self._client.is_connected:
                 await self._client.disconnect()
             self._client = None
+
