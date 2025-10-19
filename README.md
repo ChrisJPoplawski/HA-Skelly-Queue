@@ -1,79 +1,73 @@
-# Skelly Queue (Home Assistant Custom Integration)
+# 🦴 Skelly Queue (Home Assistant Integration)
 
-A tiny Home Assistant integration that adds a **music/voice queue** for your Skelly while using **Home Assistant’s own Bluetooth** (shared Bleak backend). No add-on, no extra init systems—just services to enqueue and control playback.
+**Automate your haunted show, queue your favorite spooky sounds, and control your Bluetooth-connected “Skelly” with ease — right from Home Assistant.**
 
-- Queue audio files from your local media folder (`/media/skelly`) **or** from remote URLs / M3U playlists (downloaded to a cache).
-- Services: `enqueue`, `enqueue_url`, `enqueue_m3u`, `play`, `skip`, `stop`, `clear`.
-- Compatible with tinkertims’ Web Bluetooth controller (this does **not** replace it).
+Skelly Queue was *vibe-coded* in collaboration with the Home Assistant community, blending practical automation with a touch of Halloween magic.  
+It lets you queue, schedule, and automate music or voice lines for your animatronic skeleton — whether you’re using a direct BLE connection or an ESP32 Bluetooth Proxy.
 
-## Installation
+> 💬 “If you think you can improve it — please do! Pull requests, ideas, and spooky creativity are always welcome.”
 
-### Via HACS (Custom Repository)
-1. In Home Assistant, open **HACS → Integrations → ⋮ → Custom repositories**.
-2. Add your repo URL (after you publish it): `https://github.com/<your-account>/ha-skelly-queue`, Category **Integration**.
-3. Search for **Skelly Queue (Simple)** and install.
-4. **Restart Home Assistant**.
+---
 
-### Manual
-- Copy `custom_components/skelly_queue` into `/config/custom_components/skelly_queue/` and **restart**.
+## ✨ Features
+- 🎶 **Queue audio files or playlists** — from local storage or remote URLs  
+- 📂 **Built-in web file picker** in Home Assistant’s sidebar  
+- 🔄 **BLE keep-alive** to prevent disconnects (works with or without proxies)  
+- 🧠 **Preset system** for saving show sequences  
+- ⚙️ **Simple setup wizard** with automatic UUID detection  
+- 💾 **Cache management** with size limits  
+- 🧰 **Full Home Assistant service support** for automations & scripts  
 
-## Configuration
+---
 
-Add this to your `configuration.yaml`:
+## ⚙️ Installation
+### Via HACS
+1. In HACS → **Integrations**, add this repository URL:  
+   `https://github.com/ChrisJPoplawski/HA-Skelly-Queue`
+2. Search for **Skelly Queue** and install.  
+3. Restart Home Assistant.  
+
+### Manual Install
+1. Copy the folder `custom_components/skelly_queue` into your Home Assistant `/config/custom_components/` directory.  
+2. Restart Home Assistant.  
+3. Go to **Settings → Devices & Services → Add Integration → Skelly Queue**.  
+
+---
+
+## 🎛️ Configuration
+All options are available through the UI:
+- **Keep-alive toggle:** Enable or disable BLE heartbeat  
+- **Media directory:** Where your audio files live  
+- **Cache directory & limit:** For remote downloads and playlist entries  
+- **Remote URLs:** Allow streaming or external links  
+
+No YAML required — it’s all click-and-go.
+
+---
+
+## 🧩 Example Automations
+Play all tracks in a folder:
 ```yaml
-skelly_queue:
-  address: "AA:BB:CC:DD:EE:FF"                # Skelly BLE MAC
-  play_char: "0000abcd-0000-1000-8000-00805f9b34fb"  # Replace with real UUID
-  cmd_char:  "0000abce-0000-1000-8000-00805f9b34fb"  # (optional) STOP/NEXT
-  media_dir: "/media/skelly"
-  allow_remote_urls: true
-  cache_dir: "/media/skelly/cache"
-  max_cache_mb: 500
+service: skelly_queue.enqueue_dir
+data:
+  subpath: "NightShow"
+  shuffle: true
 ```
 
-Create the media folder and upload audio:
-- **Settings → Media** → create folder `skelly`, upload `*.mp3` / `*.wav`.
-
-## Services
-
-- `skelly_queue.enqueue`
-  ```yaml
-  filename: "boo_01.mp3"
-  ```
-- `skelly_queue.enqueue_url`
-  ```yaml
-  url: "https://example.com/sounds/boo_01.mp3"
-  ```
-- `skelly_queue.enqueue_m3u`
-  ```yaml
-  url: "https://example.com/halloween_playlist.m3u8"
-  ```
-- `skelly_queue.play` — start/resume queue
-- `skelly_queue.skip` — skip current (sends `NEXT` if `cmd_char` set) and pop
-- `skelly_queue.stop` — stop and clear (sends `STOP` if `cmd_char` set)
-- `skelly_queue.clear` — clear queue
-
-## Example Dashboard Buttons
-
+Start playback:
 ```yaml
-type: horizontal-stack
-cards:
-  - type: button
-    name: Play
-    tap_action: { action: call-service, service: skelly_queue.play }
-  - type: button
-    name: Skip
-    tap_action: { action: call-service, service: skelly_queue.skip }
-  - type: button
-    name: Stop
-    tap_action: { action: call-service, service: skelly_queue.stop }
-  - type: button
-    name: Clear
-    tap_action: { action: call-service, service: skelly_queue.clear }
+service: skelly_queue.play
 ```
 
-## Notes
-- Make sure **Bluetooth** is working in HA and your Skelly is reachable.
-- If your device sends a **notify** when a track ends, you can replace the naive 10s sleep with a proper GATT notify handler for precise transitions.
-- **Payload format**: by default we send `b"PLAY:<filename>"`. If your Skelly needs a different format, edit `_send_play_command()` in `__init__.py`.
-- **Remote URLs** are cached to `cache_dir` and evicted when exceeding `max_cache_mb` (oldest-first).
+---
+
+## 🙏 Acknowledgements
+Special thanks to **[tinkertim’s BLE Skelly repo](https://github.com/tinkertims/tinkertims.github.io)** for pioneering the original skeleton-control framework that made this possible.
+
+> *Vibe-coded in collaboration with ChatGPT (Astra) and the Home Assistant community — built with a lot of coffee and Halloween spirit.*
+
+---
+
+## ⚖️ License
+MIT License © 2025 Chris Poplawski  
+Free to fork, improve, remix, and share — just give credit where it’s due.
