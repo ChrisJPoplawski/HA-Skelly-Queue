@@ -148,6 +148,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 hass.states.async_set(f"{DOMAIN}.now_playing", filename)
                 ok = await _send_play_command(filename)
                 if not ok: break
+                # TODO: replace with a real completion signal if Skelly provides one
                 await asyncio.sleep(10)
                 queue.popleft()
                 hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
@@ -240,7 +241,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
         if files and not is_playing: hass.async_create_task(_play_loop())
 
-    async def svc_play(_): 
+    async def svc_play(_):
         if queue and not is_playing: hass.async_create_task(_play_loop())
 
     async def svc_skip(_):
@@ -269,7 +270,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.states.async_set(f"{DOMAIN}.queue_length", 0)
     hass.states.async_set(f"{DOMAIN}.now_playing", "")
 
-    # ------- Panel (fixed path) -------
+    # ------- Panel (authenticated route) -------
     panel_data = {
         "config": {"media_dir": media_dir, "cache_dir": cache_dir},
         "queue": queue,
@@ -294,7 +295,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     )
 
     _LOGGER.info(
-        "Skelly Queue v0.4.4 ready (keep-alive %s @ %ss, pair_on_connect=%s; PIN hint=%s). Media: %s",
+        "Skelly Queue v0.4.5 ready (keep-alive %s @ %ss, pair_on_connect=%s; PIN hint=%s). Media: %s",
         "on" if keepalive_enabled else "off", keepalive_sec,
         "on" if pair_on_connect else "off", pin_code_hint, media_dir
     )

@@ -1,24 +1,23 @@
 from __future__ import annotations
-import json, os, posixpath
-from typing import Any
+import os
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 
 class SkellyPanelView(HomeAssistantView):
-    """Serves the simple file-picker UI and JSON endpoints."""
-    url = "/skelly_queue"
-    name = "skelly_queue:index"
+    """Authenticated HTML panel for the Skelly Queue."""
+    url = "/api/skelly_queue/panel"
+    name = "skelly_queue:panel"
     requires_auth = True
 
     def __init__(self, hass, data):
         self.hass = hass
-        self.data = data  # dict with media_dir, queue, controls, presets
+        self.data = data  # {"config": {...}, "queue": deque, "presets": dict, "store": Store}
 
     async def get(self, request):
-        # Single-page app (vanilla HTML+JS)
         html = """
 <!doctype html><html><head><meta charset="utf-8"/>
 <title>Skelly Queue</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
 <style>
 body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#0b0b0c;color:#e7e7ea}
 header{display:flex;gap:12px;align-items:center;padding:14px 16px;background:#151518;position:sticky;top:0}
@@ -70,11 +69,22 @@ small{opacity:.7}
   </aside>
 </main>
 <script>
-async function api(path, opts){const r = await fetch('/skelly_queue/api'+path,{credentials:'same-origin',headers:{'Content-Type':'application/json'},...opts}); if(!r.ok) throw new Error(await r.text()); return r.json();}
+async function api(path, opts){
+  const r = await fetch('/api/skelly_queue'+path,{
+    credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    ...opts
+  });
+  if(!r.ok) throw new Error(await r.text());
+  return r.json();
+}
 function join(a,b){if(!a) return b||''; if(!b) return a; return a.replace(/\\/+$/,'')+'/'+b.replace(/^\\/+/, '');}
 let cwd = ''; let ROOT = '';
+
 async function refreshState(){const s = await api('/state'); document.getElementById('state').textContent = `Now: ${s.now||'-'} • Queue: ${s.len}`;}
-async function list(dir){const data = await api('/list?path='+encodeURIComponent(dir||'')); ROOT = data.root; document.getElementById('root').textContent = ROOT; cwd = data.path||''; document.getElementById('path').value=cwd; const el=document.getElementById('list'); el.innerHTML='';
+async function list(dir){
+  const data = await api('/list?path='+encodeURIComponent(dir||'')); ROOT = data.root; document.getElementById('root').textContent = ROOT; cwd = data.path||''; document.getElementById('path').value=cwd;
+  const el=document.getElementById('list'); el.innerHTML='';
   if(cwd){const up=document.createElement('div'); up.className='item'; up.innerHTML='<div>..</div><div><button>Open</button></div>'; up.querySelector('button').onclick=()=>{const p=cwd.replace(/\\/?[^\\/]+$/,''); list(p)}; el.appendChild(up);}
   for(const d of data.dirs){const row=document.createElement('div'); row.className='item'; row.innerHTML='<div>📁 '+d+'</div><div><button>Open</button><button>Enqueue</button></div>'; const [open,enq]=row.querySelectorAll('button'); open.onclick=()=>list(join(cwd,d)); enq.onclick=()=>enqueueDir(join(cwd,d)); el.appendChild(row);}
   for(const f of data.files){const row=document.createElement('div'); row.className='item'; row.innerHTML='<div>🎵 '+f+'</div><div><button>Add</button></div>'; row.querySelector('button').onclick=()=>enqueue(join(cwd,f)); el.appendChild(row);}
@@ -85,10 +95,8 @@ async function enqueueDir(rel){const recursive=document.getElementById('recursiv
 document.getElementById('browse').onclick=()=>list(document.getElementById('path').value.trim());
 document.getElementById('up').onclick=()=>{if(!cwd) return; const p=cwd.replace(/\\/?[^\\/]+$/,''); list(p);}
 document.getElementById('enqueue-all').onclick=()=>enqueueDir(cwd);
-document.getElementById('enqueue-url').onclick=async()=>{const u=document.getElementById('url').value.trim(); if(!u) return; await api('/enqueue_url',{method:'POST',body:JSON.stringify({url:u})}); document.getElementById('url').value=''; refreshState();};
-for(const [id,svc] of [['play','play'],['skip','skip'],['stop','stop'],['clear','clear']]){
-  document.getElementById(id).onclick=()=>api('/'+svc,{method:'POST'}).then(refreshState);
-}
+document.getElementById('enqueue-url').onclick=async()=>{const u=document.getElementById('url').value.trim(); if(!u) return; if(u.toLowerCase().endsWith('.m3u')||u.toLowerCase().endsWith('.m3u8')){await api('/enqueue_m3u',{method:'POST',body:JSON.stringify({url:u})});} else {await api('/enqueue_url',{method:'POST',body:JSON.stringify({url:u})});} document.getElementById('url').value=''; refreshState();};
+for(const [id,svc] of [['play','play'],['skip','skip'],['stop','stop'],['clear','clear']]){document.getElementById(id).onclick=()=>api('/'+svc,{method:'POST'}).then(refreshState);}
 async function loadPresets(){const p = await api('/presets'); const sel = document.getElementById('preset-load'); sel.innerHTML=''; p.forEach(name=>{const o=document.createElement('option'); o.value=name;o.textContent=name;sel.appendChild(o);});}
 document.getElementById('save-preset').onclick=async()=>{const name=document.getElementById('preset-name').value.trim(); if(!name) return; await api('/save_preset',{method:'POST',body:JSON.stringify({name})}); await loadPresets();};
 document.getElementById('load-preset').onclick=async()=>{const name=document.getElementById('preset-load').value; if(!name) return; await api('/load_preset',{method:'POST',body:JSON.stringify({name})}); refreshState();};
@@ -98,14 +106,16 @@ list(''); loadPresets();
 """
         return web.Response(text=html, content_type="text/html")
 
+
 class SkellyApiView(HomeAssistantView):
-    url = "/skelly_queue/api/{op}"
+    """Authenticated JSON API endpoints used by the panel JS."""
+    url = "/api/skelly_queue/{op}"
     name = "skelly_queue:api"
     requires_auth = True
 
     def __init__(self, hass, data):
         self.hass = hass
-        self.data = data  # same dict from __init__.py
+        self.data = data
 
     async def get(self, request, op):
         if op == "state":
@@ -115,12 +125,9 @@ class SkellyApiView(HomeAssistantView):
         if op == "list":
             media_root = self.data["config"]["media_dir"]
             rel = request.query.get("path","").strip().strip("/")
-            root = media_root
-            base = os.path.abspath(root)
-            target = os.path.abspath(os.path.join(root, rel))
-            if not target.startswith(base):  # path traversal guard
-                target = base
-                rel = ""
+            base = os.path.abspath(media_root)
+            target = os.path.abspath(os.path.join(media_root, rel))
+            if not target.startswith(base): target = base; rel = ""
             dirs, files = [], []
             try:
                 for name in os.listdir(target):
@@ -131,39 +138,36 @@ class SkellyApiView(HomeAssistantView):
             except Exception:
                 pass
             dirs.sort(); files.sort()
-            return self.json({"root": root, "path": rel, "dirs": dirs, "files": files})
+            return self.json({"root": media_root, "path": rel, "dirs": dirs, "files": files})
         if op == "presets":
-            presets = sorted(self.data["presets"].keys())
-            return self.json(presets)
+            return self.json(sorted(self.data["presets"].keys()))
         return web.Response(status=404)
 
     async def post(self, request, op):
         body = await request.json() if request.can_read_body else {}
-        svc = self.hass.services.async_call
         if op == "enqueue":
-            await svc("skelly_queue", "enqueue", {"filename": body.get("filename")}, blocking=True); return self.json({"ok":1})
+            await self.hass.services.async_call("skelly_queue", "enqueue", {"filename": body.get("filename")}, blocking=True); return self.json({"ok":1})
         if op == "enqueue_dir":
-            await svc("skelly_queue", "enqueue_dir", body, blocking=True); return self.json({"ok":1})
+            await self.hass.services.async_call("skelly_queue", "enqueue_dir", body, blocking=True); return self.json({"ok":1})
         if op == "enqueue_url":
-            url = body.get("url"); 
+            url = body.get("url")
             if url and url.lower().endswith((".m3u",".m3u8")):
-                await svc("skelly_queue", "enqueue_m3u", {"url": url}, blocking=True)
+                await self.hass.services.async_call("skelly_queue", "enqueue_m3u", {"url": url}, blocking=True)
             else:
-                await svc("skelly_queue", "enqueue_url", {"url": url}, blocking=True)
+                await self.hass.services.async_call("skelly_queue", "enqueue_url", {"url": url}, blocking=True)
             return self.json({"ok":1})
         if op in ("play","skip","stop","clear"):
-            await svc("skelly_queue", op, {}, blocking=True); return self.json({"ok":1})
+            await self.hass.services.async_call("skelly_queue", op, {}, blocking=True); return self.json({"ok":1})
         if op == "save_preset":
             name = (body.get("name") or "").strip()
-            if name: 
-                q = list(self.data["queue"])  # snapshot current queue (relative paths)
-                self.data["presets"][name] = q
+            if name:
+                q = list(self.data["queue"]); self.data["presets"][name] = q
                 await self.data["store"].async_save(self.data["presets"])
             return self.json({"ok":1})
         if op == "load_preset":
             name = (body.get("name") or "").strip()
             items = self.data["presets"].get(name, [])
-            await svc("skelly_queue", "enqueue_bulk", {"items": items}, blocking=True)
+            await self.hass.services.async_call("skelly_queue", "enqueue_bulk", {"items": items}, blocking=True)
             return self.json({"ok":1})
         return web.Response(status=404)
 
