@@ -1,7 +1,7 @@
 {
   "domain": "skelly_queue",
   "name": "Skelly Queue",
-  "version": "0.4.21",
+  "version": "0.4.22",
   "documentation": "https://github.com/ChrisJPoplawski/HA-Skelly-Queue",
   "requirements": [
     "smbprotocol>=1.15.0",
