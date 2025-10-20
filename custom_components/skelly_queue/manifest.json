@@ -1,7 +1,7 @@
 {
   "domain": "skelly_queue",
   "name": "Skelly Queue",
-  "version": "0.4.15",
+  "version": "0.4.16",
   "documentation": "https://github.com/ChrisPoplawski/HA-Skelly-Queue",
   "requirements": ["pysmb==1.2.9"],
   "dependencies": ["bluetooth", "media_source", "frontend", "http"],
