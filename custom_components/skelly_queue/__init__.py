@@ -1,350 +1,304 @@
 from __future__ import annotations
-import asyncio, logging, re, os, random, io
-from os import path, makedirs, stat, remove
-from typing import Deque, List
-from collections import deque
 
+import asyncio
+import os
+from dataclasses import dataclass, field
+from typing import List, Optional
+from urllib.parse import urlparse, unquote
+
+import aiohttp
+import smbclient
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.storage import Store
-from homeassistant.components.frontend import async_register_built_in_panel, async_remove_panel
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.components.frontend import async_register_built_in_panel
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 
-from bleak import BleakClient
-from bleak_retry_connector import establish_connection
-from homeassistant.components.bluetooth import async_ble_device_from_address
-
-from .const import *
-from .skelly_ble import SkellyBle
+# Local modules
 from .panel import SkellyPanelView, SkellyApiView
+from .skelly_ble import SkellyBLE
 
-_LOGGER = logging.getLogger(__name__)
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON]
+DOMAIN = "skelly_queue"
 
-URL_RE = re.compile(r"^(https?://|smb://)", re.IGNORECASE)
-SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
-PLAYABLE_EXT = (".mp3", ".wav", ".ogg", ".m4a", ".flac")
+# ---------- defaults ----------
+DEFAULT_MEDIA_DIR = "/media/skelly"
+DEFAULT_CACHE_DIR = "/media/skelly/.cache"
+DEFAULT_LOG_PATH = "/config/home-assistant.log"
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    data = entry.data
-    address = data[CONF_ADDRESS]
-    play_char = data.get(CONF_PLAY_CHAR, "")
-    cmd_char = data.get(CONF_CMD_CHAR, "")
-    media_dir = data.get(CONF_MEDIA_DIR, "/media/skelly")
-    allow_remote = data.get(CONF_ALLOW_REMOTE, True)
-    cache_dir = data.get(CONF_CACHE_DIR, "/media/skelly/cache")
-    max_cache_mb = max(50, int(data.get(CONF_MAX_CACHE_MB, 500)))
-    keepalive_enabled = bool(data.get(CONF_KEEPALIVE_ENABLED, True))
-    keepalive_sec = max(1, int(data.get(CONF_KEEPALIVE_SEC, 5)))
-    pair_on_connect = bool(data.get(CONF_PAIR_ON_CONNECT, True))
-    pin_code_hint = (data.get(CONF_PIN_CODE) or "1234").strip()
+# ---------- datamodel ----------
+@dataclass
+class SkellyData:
+    hass: HomeAssistant
+    address: Optional[str] = None
+    play_uuid: Optional[str] = None
+    cmd_uuid: Optional[str] = None
+    media_dir: str = DEFAULT_MEDIA_DIR
+    cache_dir: str = DEFAULT_CACHE_DIR
+    log_path: str = DEFAULT_LOG_PATH
+    ble: Optional[SkellyBLE] = None
+    queue: List[str] = field(default_factory=list)
+    now_playing: Optional[str] = None
+    presets: dict = field(default_factory=dict)
 
-    for d in (media_dir, cache_dir):
-        try: makedirs(d, exist_ok=True)
-        except Exception as ex: _LOGGER.warning("Could not create dir %s: %s", d, ex)
+    def as_panel_dict(self) -> dict:
+        return {
+            "address": self.address,
+            "config": {"media_dir": self.media_dir, "cache_dir": self.cache_dir},
+            "ble": self.ble,
+            "presets": self.presets,
+            "log_path": self.log_path,
+        }
 
-    # Auto-detect UUIDs if missing
-    if not play_char:
-        try:
-            dev = async_ble_device_from_address(hass, address, connectable=True)
-            if dev:
-                client: BleakClient = await establish_connection(BleakClient, dev, name="skelly-detect", max_attempts=3)
-                await client.get_services()
-                cands = []
-                for svc in client.services:
-                    for ch in svc.characteristics:
-                        props = {p.lower() for p in ch.properties}
-                        if "write" in props or "write without response" in props:
-                            cu = str(ch.uuid)
-                            score = (len(cu) > 8, "without" in " ".join(props))
-                            cands.append((score, cu))
-                cands.sort(reverse=True)
-                if cands: play_char = cands[0][1]
-                if len(cands) > 1 and not cmd_char: cmd_char = cands[1][1]
-                try: await client.disconnect()
-                except Exception: pass
-                new = dict(entry.data); new[CONF_PLAY_CHAR] = play_char or ""; new[CONF_CMD_CHAR] = cmd_char or ""
-                hass.config_entries.async_update_entry(entry, data=new)
-                _LOGGER.info("Startup auto-detect set play_char=%s cmd_char=%s", play_char, cmd_char)
-            else:
-                _LOGGER.warning("Startup auto-detect: Skelly not discovered yet")
-        except Exception as ex:
-            _LOGGER.warning("Startup auto-detect failed: %s", ex)
+# -----------------------------------------------------------------------------
+# Download helpers (HTTP/HTTPS + SMB2/3 via smbclient)
+# -----------------------------------------------------------------------------
+async def download_to_cache(hass: HomeAssistant, url: str, cache_dir: str) -> str:
+    """
+    Download http/https/smb URL into cache_dir and return the local file path.
 
-    ble = SkellyBle(hass, address, play_char, cmd_char or None, pair_on_connect=pair_on_connect)
-    queue: Deque[str] = deque()
-    is_playing = False
-    now_playing: str | None = None
-    play_lock = asyncio.Lock()
-    session = async_get_clientsession(hass)
+    - http/https: streamed via aiohttp
+    - smb://user:pass@host/share/path/file: streamed via smbclient (SMB2/3)
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    u = urlparse(url)
 
-    # Presets storage
-    store = Store(hass, STORAGE_VERSION, f"{DOMAIN}.storage")
-    presets = await store.async_load() or {}
-    if not isinstance(presets, dict): presets = {}
-
-    def _sanitize_name(name: str) -> str:
-        base = name.split("?")[0].split("/")[-1] or "track"
-        return SAFE_NAME_RE.sub("_", base)[:120]
-
-    def _media_path(local_name: str) -> str:
-        return path.join(media_dir, local_name)
-
-    async def _download_to_cache(url: str) -> str:
-        """Download http(s) or smb file to local cache and return media-relative path."""
-        if not allow_remote:
-            raise ValueError("Remote URLs are disabled.")
-        if url.lower().startswith("http"):
-            safe = _sanitize_name(url)
-            local_rel = path.join("cache", safe)
-            dest = _media_path(local_rel)
-            async with session.get(url, timeout=120) as resp:
+    if u.scheme in ("http", "https"):
+        filename = os.path.basename(u.path) or "track"
+        local = os.path.join(cache_dir, filename)
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(url) as resp:
                 resp.raise_for_status()
-                makedirs(path.dirname(dest), exist_ok=True)
-                with open(dest, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(8192):
+                # write in chunks
+                def _write_stream():
+                    with open(local, "wb") as f:
+                        pass  # truncate
+                await hass.async_add_executor_job(_write_stream)
+
+                with open(local, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(131072):
                         f.write(chunk)
-            await _evict_cache_if_needed()
-            return local_rel
+        return local
 
-        if url.lower().startswith("smb://"):
-            # smb://user:pass@host/share/path/file.mp3
-            try:
-                from urllib.parse import urlparse, unquote
-                from smb.SMBConnection import SMBConnection
-            except Exception as ex:
-                raise RuntimeError("SMB support requires pysmb; install via HACS manifest.") from ex
-            u = urlparse(url)
-            username = unquote(u.username or "")
-            password = unquote(u.password or "")
-            server = u.hostname
-            share, *parts = [p for p in u.path.split("/") if p]
-            remote_path = "/".join(parts)
-            if not (server and share and remote_path):
-                raise ValueError("SMB URL must look like smb://user:pass@host/share/path/file.mp3")
-            conn = SMBConnection(username, password, "ha-skelly", server, use_ntlm_v2=True, is_direct_tcp=True)
-            assert conn.connect(server, 445)
-            safe = _sanitize_name(remote_path)
-            local_rel = path.join("cache", safe)
-            dest = _media_path(local_rel)
-            makedirs(path.dirname(dest), exist_ok=True)
-            with open(dest, "wb") as f:
-                conn.retrieveFile(share, f"/{remote_path}", f)
-            conn.close()
-            await _evict_cache_if_needed()
-            return local_rel
+    if u.scheme == "smb":
+        host = u.hostname
+        parts = [p for p in u.path.split("/") if p]
+        if not host or len(parts) < 2:
+            raise ValueError("smb url must be smb://user:pass@host/share/path/file")
 
-        raise ValueError("Unsupported URL scheme")
+        share = parts[0]
+        sub = "/".join(parts[1:-1])
+        filename = parts[-1]
+        username = unquote(u.username or "")
+        password = unquote(u.password or "")
+        port = 445
 
-    async def _evict_cache_if_needed():
-        try:
-            entries = []; total = 0
-            for fname in os.listdir(cache_dir):
-                fpath = path.join(cache_dir, fname)
-                try:
-                    st = stat(fpath); total += st.st_size; entries.append((st.st_mtime, st.st_size, fpath))
-                except Exception:
-                    continue
-            limit = max_cache_mb * 1024 * 1024
-            if total <= limit: return
-            entries.sort()
-            for _, size, fpath in entries:
-                try: remove(fpath); total -= size
-                except Exception: pass
-                if total <= limit: break
-        except Exception as ex:
-            _LOGGER.debug("Cache eviction failed: %s", ex)
+        # register session and copy file
+        smbclient.reset_connection_cache()
+        smbclient.register_session(
+            server=host,
+            username=username or None,
+            password=password or None,
+            port=port,
+        )
+        remote = rf"\\{host}\{share}" + (rf"\{sub}" if sub else "") + rf"\{filename}"
+        local = os.path.join(cache_dir, filename)
 
-    async def _send_play_command(filename: str) -> bool:
-        payload = f"PLAY:{filename}".encode("utf-8")
-        return await ble.write_play(payload)
+        def _copy():
+            with smbclient.open_file(remote, mode="rb") as rf, open(local, "wb") as lf:
+                while True:
+                    data = rf.read(131072)
+                    if not data:
+                        break
+                    lf.write(data)
 
-    async def _send_cmd(cmd: str) -> bool:
-        if not cmd_char: return False
-        return await ble.write_cmd(cmd.encode("utf-8"))
+        await hass.async_add_executor_job(_copy)
+        return local
 
-    async def _play_loop():
-        nonlocal is_playing, now_playing
-        async with play_lock:
-            if is_playing: return
-            is_playing = True
-        try:
-            while queue:
-                filename = queue[0]
-                full = _media_path(filename)
-                if not path.isfile(full):
-                    queue.popleft(); continue
-                now_playing = filename
-                hass.states.async_set(f"{DOMAIN}.now_playing", filename)
-                ok = await _send_play_command(filename)
-                if not ok: break
-                # TODO: replace with device "done" event when available
-                await asyncio.sleep(10)
-                queue.popleft()
-                hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
-            now_playing = None
-            hass.states.async_set(f"{DOMAIN}.now_playing", "")
-        finally:
-            async with play_lock:
-                is_playing = False
+    raise ValueError(f"Unsupported scheme for enqueue_url: {u.scheme}")
 
-    # ---- Keep-alive (optional) ----
-    keepalive_task: asyncio.Task | None = None
-    async def _keepalive_loop():
-        if not cmd_char:
-            _LOGGER.debug("Keep-alive skipped: no cmd_char configured.")
-            return
-        while True:
-            try:
-                await asyncio.sleep(keepalive_sec)
-                await ble.write_cmd(b"PING")
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                continue
 
-    if keepalive_enabled:
-        keepalive_task = hass.loop.create_task(_keepalive_loop())
+# -----------------------------------------------------------------------------
+# Core HA entry points
+# -----------------------------------------------------------------------------
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    return True
 
-    # ------- Services -------
-    async def svc_enqueue(call):
-        fn = call.data.get("filename")
-        if not fn: return
-        queue.append(fn)
-        hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
-        if not is_playing: hass.async_create_task(_play_loop())
 
-    async def svc_enqueue_bulk(call):
-        items = call.data.get("items") or []
-        for it in items:
-            if isinstance(it, str): queue.append(it)
-        hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
-        if items and not is_playing: hass.async_create_task(_play_loop())
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # Pull config/options (if present)
+    address = (entry.data.get("address") or entry.options.get("address")) if entry else None
+    play_uuid = (entry.data.get("play_uuid") or entry.options.get("play_uuid")) if entry else None
+    cmd_uuid = (entry.data.get("cmd_uuid") or entry.options.get("cmd_uuid")) if entry else None
+    media_dir = (entry.data.get("media_dir") or entry.options.get("media_dir") or DEFAULT_MEDIA_DIR)
+    cache_dir = (entry.data.get("cache_dir") or entry.options.get("cache_dir") or DEFAULT_CACHE_DIR)
+    log_path = (entry.data.get("log_path") or entry.options.get("log_path") or DEFAULT_LOG_PATH)
 
-    async def svc_enqueue_url(call):
-        url = call.data.get("url")
-        if not url: return
-        rel = await _download_to_cache(url)
-        queue.append(rel)
-        hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
-        if not is_playing: hass.async_create_task(_play_loop())
+    data = SkellyData(
+        hass=hass,
+        address=address,
+        play_uuid=play_uuid,
+        cmd_uuid=cmd_uuid,
+        media_dir=media_dir,
+        cache_dir=cache_dir,
+        log_path=log_path,
+    )
 
-    async def svc_enqueue_m3u(call):
-        url = call.data.get("url")
-        if not url: return
-        async with session.get(url, timeout=120) as resp:
-            resp.raise_for_status()
-            text = await resp.text()
-        items = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
-        count = 0
-        for item in items:
-            if not URL_RE.match(item): continue
-            try:
-                rel = await _download_to_cache(item); queue.append(rel); count += 1
-            except Exception as ex:
-                _LOGGER.debug("m3u item failed: %s", ex)
-                continue
-        hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
-        if count and not is_playing: hass.async_create_task(_play_loop())
+    # BLE (optional)
+    ble: Optional[SkellyBLE] = None
+    if address:
+        ble = SkellyBLE(hass, address, play_uuid=play_uuid, cmd_uuid=cmd_uuid)
+        data.ble = ble
 
-    async def svc_enqueue_dir(call):
-        sub = (call.data.get("subpath") or "").strip().strip("/")
-        recursive = bool(call.data.get("recursive", True))
-        shuffle = bool(call.data.get("shuffle", False))
-        base = path.abspath(media_dir)
-        target = path.abspath(path.join(media_dir, sub))
-        if not target.startswith(base): target = base
-        files: List[str] = []
-        if recursive:
-            for root, dirs, fns in os.walk(target):
-                for name in sorted(fns):
-                    if name.lower().endswith(PLAYABLE_EXT):
-                        rel = path.relpath(path.join(root, name), media_dir)
-                        files.append(rel)
-        else:
-            for name in sorted(os.listdir(target)):
-                if name.lower().endswith(PLAYABLE_EXT):
-                    rel = path.join(sub, name) if sub else name
-                    files.append(rel)
-        if shuffle: random.shuffle(files)
-        for f in files: queue.append(f)
-        hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
-        if files and not is_playing: hass.async_create_task(_play_loop())
-
-    async def svc_play(_): 
-        if queue and not is_playing: hass.async_create_task(_play_loop())
-
-    async def svc_skip(_):
-        await _send_cmd("NEXT")
-        if queue:
-            queue.popleft()
-            hass.states.async_set(f"{DOMAIN}.queue_length", len(queue))
-
-    async def svc_clear(_):
-        queue.clear(); hass.states.async_set(f"{DOMAIN}.queue_length", 0)
-
-    async def svc_stop(_):
-        await _send_cmd("STOP")
-        queue.clear(); hass.states.async_set(f"{DOMAIN}.queue_length", 0)
-
-    hass.services.async_register(DOMAIN, SERVICE_ENQUEUE, svc_enqueue)
-    hass.services.async_register(DOMAIN, SERVICE_ENQUEUE_BULK, svc_enqueue_bulk)
-    hass.services.async_register(DOMAIN, SERVICE_ENQUEUE_URL, svc_enqueue_url)
-    hass.services.async_register(DOMAIN, SERVICE_ENQUEUE_M3U, svc_enqueue_m3u)
-    hass.services.async_register(DOMAIN, SERVICE_ENQUEUE_DIR, svc_enqueue_dir)
-    hass.services.async_register(DOMAIN, SERVICE_PLAY, svc_play)
-    hass.services.async_register(DOMAIN, SERVICE_SKIP, svc_skip)
-    hass.services.async_register(DOMAIN, SERVICE_CLEAR, svc_clear)
-    hass.services.async_register(DOMAIN, SERVICE_STOP, svc_stop)
-
-    hass.states.async_set(f"{DOMAIN}.queue_length", 0)
-    hass.states.async_set(f"{DOMAIN}.now_playing", "")
-
-    # ------- Panel (authenticated API + public HTML) -------
-    panel_data = {
-        "config": {"media_dir": media_dir, "cache_dir": cache_dir},
-        "queue": queue,
-        "presets": presets,
-        "store": store,
-        "ble": ble,
-        "address": address,
-        "log_path": "/config/home-assistant.log",
-    }
-    hass.http.register_view(SkellyPanelView(hass, panel_data))
-    hass.http.register_view(SkellyApiView(hass, panel_data))
-
-    panel_url_path = "skelly-queue"
-    async_remove_panel(hass, panel_url_path)
+    # Register panel + API
+    hass.http.register_view(SkellyPanelView(hass, data.as_panel_dict()))
+    hass.http.register_view(SkellyApiView(hass, data.as_panel_dict()))
     async_register_built_in_panel(
         hass,
         component_name="iframe",
         sidebar_title="Skelly Queue",
         sidebar_icon="mdi:playlist-music",
-        frontend_url_path=panel_url_path,
         config={"url": "/api/skelly_queue/panel"},
-        require_admin=False,
         update=True,
+        require_admin=False,
     )
 
-    _LOGGER.info(
-        "Skelly Queue v0.4.8 ready (keep-alive %s @ %ss, pair_on_connect=%s; PIN hint=%s). Media: %s",
-        "on" if keepalive_enabled else "off", keepalive_sec,
-        "on" if pair_on_connect else "off", pin_code_hint, media_dir
-    )
+    # basic states used by panel
+    _set_state(hass, "skelly_queue.queue_length", 0)
+    _set_state(hass, "skelly_queue.now_playing", "")
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Service handlers
+    async def _svc_enqueue(call: ServiceCall):
+        rel = (call.data.get("filename") or "").strip().strip("/")
+        if not rel:
+            raise ValueError("filename is required")
+        src = os.path.join(data.media_dir, rel)
+        if not os.path.isfile(src):
+            raise FileNotFoundError(f"Not found: {src}")
+        data.queue.append(src)
+        _update_len(hass, data)
 
-    async def _shutdown(_evt):
-        if keepalive_task:
-            keepalive_task.cancel()
-        await ble.disconnect()
+    async def _scan_local(subpath: str, recursive: bool) -> List[str]:
+        base = os.path.abspath(data.media_dir)
+        start = os.path.abspath(os.path.join(base, subpath.strip().strip("/")))
+        if not start.startswith(base):
+            start = base
+        found: List[str] = []
 
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _shutdown)
+        def _walk():
+            if not os.path.isdir(start):
+                return
+            if recursive:
+                for root, _dirs, files in os.walk(start):
+                    for f in files:
+                        found.append(os.path.join(root, f))
+            else:
+                for f in os.listdir(start):
+                    full = os.path.join(start, f)
+                    if os.path.isfile(full):
+                        found.append(full)
+
+        await hass.async_add_executor_job(_walk)
+        return found
+
+    async def _svc_enqueue_dir(call: ServiceCall):
+        sub = (call.data.get("subpath") or "").strip()
+        recursive = bool(call.data.get("recursive", True))
+        shuffle = bool(call.data.get("shuffle", False))
+        files = await _scan_local(sub, recursive)
+        if shuffle:
+            import random
+            random.shuffle(files)
+        data.queue.extend(files)
+        _update_len(hass, data)
+
+    async def _svc_enqueue_url(call: ServiceCall):
+        url = (call.data.get("url") or "").strip()
+        if not url:
+            raise ValueError("url is required")
+        # handle m3u/m3u8 by URL (http/https), otherwise download SMB/http
+        if url.lower().endswith(".m3u") or url.lower().endswith(".m3u8"):
+            # naive playlist fetch (http/https)
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(url) as resp:
+                    resp.raise_for_status()
+                    text = await resp.text()
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+            for item in lines:
+                data.queue.append(item)  # store raw; your player/worker should resolve later
+        else:
+            # Download remote to cache, then queue local file
+            local = await download_to_cache(hass, url, data.cache_dir)
+            data.queue.append(local)
+        _update_len(hass, data)
+
+    async def _svc_play(call: ServiceCall):
+        if not data.queue:
+            _set_state(hass, "skelly_queue.now_playing", "")
+            return
+        track = data.queue.pop(0)
+        _update_len(hass, data)
+        data.now_playing = os.path.basename(track)
+        _set_state(hass, "skelly_queue.now_playing", data.now_playing)
+
+        # send to Skelly via BLE (best-effort)
+        if data.ble:
+            try:
+                await data.ble.play_file(track)
+            except Exception:
+                # Leave a breadcrumb in the HA log; the panel's log viewer will show it.
+                pass
+
+    async def _svc_skip(call: ServiceCall):
+        await _svc_play(call)
+
+    async def _svc_stop(call: ServiceCall):
+        data.now_playing = None
+        _set_state(hass, "skelly_queue.now_playing", "")
+
+    async def _svc_clear(call: ServiceCall):
+        data.queue.clear()
+        _update_len(hass, data)
+        data.now_playing = None
+        _set_state(hass, "skelly_queue.now_playing", "")
+
+    hass.services.async_register(DOMAIN, "enqueue", _svc_enqueue)
+    hass.services.async_register(DOMAIN, "enqueue_dir", _svc_enqueue_dir)
+    hass.services.async_register(DOMAIN, "enqueue_url", _svc_enqueue_url)
+    hass.services.async_register(DOMAIN, "play", _svc_play)
+    hass.services.async_register(DOMAIN, "skip", _svc_skip)
+    hass.services.async_register(DOMAIN, "stop", _svc_stop)
+    hass.services.async_register(DOMAIN, "clear", _svc_clear)
+
+    # graceful shutdown
+    async def _on_stop(_event):
+        if data.ble:
+            try:
+                await data.ble.disconnect()
+            except Exception:
+                pass
+
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _on_stop)
+
+    # stash on hass for access from panel.py if ever needed
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN]["data"] = data
     return True
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    return unload_ok
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # Nothing persistent to unload beyond views/panel, which HA cleans up on reload.
+    return True
+
+
+# -----------------------------------------------------------------------------
+# small helpers for states
+# -----------------------------------------------------------------------------
+def _update_len(hass: HomeAssistant, data: SkellyData) -> None:
+    _set_state(hass, "skelly_queue.queue_length", len(data.queue))
+
+
+def _set_state(hass: HomeAssistant, entity_id: str, value) -> None:
+    # Lightweight state updates without a full entity platform for the simple UI
+    attrs = {}
+    hass.states.async_set(entity_id, value, attrs)
 
