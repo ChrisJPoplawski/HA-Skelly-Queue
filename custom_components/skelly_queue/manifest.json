@@ -10,6 +10,6 @@
   "iot_class": "local_push",
   "config_flow": true,
   "dependencies": ["http", "bluetooth"],
+  "after_dependencies": ["frontend"],
   "issue_tracker": "https://github.com/ChrisJPoplawski/HA-Skelly-Queue/issues"
 }
-
